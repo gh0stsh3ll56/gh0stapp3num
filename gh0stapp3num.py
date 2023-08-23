@@ -7,6 +7,10 @@ import hashlib
 import time
 import subprocess
 import pkg_resources
+import threading
+from tqdm import tqdm
+from datetime import datetime
+from colorama import Fore, Back, Style, init
 
 def detect_dll_vulnerabilities(path, verbose=False):
     if not os.path.exists(path):
@@ -61,6 +65,23 @@ def verify_digital_signature(file_path):
         pass
     return False
 
+def scan_dll_vulnerabilities(app_path, verbose, enable_progress_bar):
+    vulnerabilities, writable_dirs = detect_dll_hijacking_vulnerabilities(app_path, verbose)
+    total_steps = len(vulnerabilities) + len(writable_dirs)
+    progress_bar = tqdm(total=total_steps, unit=' step', desc="DLL Vulnerability Scan")
+    if enable_progress_bar:
+        for vulnerability in vulnerabilities:
+            time.sleep(0.1)  # Simulate processing time
+            progress_bar.update(1)
+        for writable_dir in writable_dirs:
+            time.sleep(0.1)  # Simulate processing time
+            progress_bar.update(1)
+    progress_bar.close()
+    return vulnerabilities, writable_dirs
+
+
+
+
 def detect_windows_dll_vulnerabilities(application_path, verbose=False):
     legitimate_paths = [
         r"C:\Windows\System32\kernel32.dll",
@@ -70,39 +91,27 @@ def detect_windows_dll_vulnerabilities(application_path, verbose=False):
 
     suspicious_dlls = []
 
-    try:
-        process = subprocess.Popen(application_path)
-        process.wait()
+    process = psutil.Popen(application_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    process.wait()
 
-        app_dir = os.path.dirname(application_path)
-        app_dlls = [dll for dll in os.listdir(app_dir) if dll.lower().endswith(".dll")]
-        for dll in app_dlls:
-            dll_path = os.path.join(app_dir, dll)
-            if not any(legit_path.lower() in dll_path.lower() for legit_path in legitimate_paths):
-                if not is_path_writable(app_dir) and not verify_digital_signature(dll_path):
-                    suspicious_dlls.append((dll_path, "Potential DLL hijacking"))
+    if verbose:
+        print("Application Output (stdout):")
+        print(stdout.decode("utf-8"))
 
-                if verbose:
-                    print(f"Suspicious DLL in app directory: {dll_path}")
+        print("Application Errors (stderr):")
+        print(stderr.decode("utf-8"))
 
-        for module in process.memory_maps():
-            dll_path = module.path
-            if dll_path.lower().endswith(".dll"):
-                if not any(legit_path.lower() in dll_path.lower() for legit_path in legitimate_paths):
-                    if not is_path_writable(os.path.dirname(dll_path)) and not verify_digital_signature(dll_path):
-                        suspicious_dlls.append((dll_path, "Potential DLL hijacking"))
+    app_dir = os.path.dirname(application_path)
+    app_dlls = [dll for dll in os.listdir(app_dir) if dll.lower().endswith(".dll")]
+    for dll in app_dlls:
+        dll_path = os.path.join(app_dir, dll)
+        if not any(legit_path.lower() in dll_path.lower() for legit_path in legitimate_paths):
+            if not is_path_writable(app_dir) and not verify_digital_signature(dll_path):
+                suspicious_dlls.append((dll_path, "Potential DLL hijacking"))
 
-                    if verbose:
-                        print(f"Suspicious DLL in loaded module: {dll_path}")
-
-    except Exception as e:
-        print(f"Error during DLL vulnerability scan: {e}")
-
-    finally:
-        try:
-            process.terminate()
-        except psutil.NoSuchProcess:
-            pass
+            if verbose:
+                print(f"Suspicious DLL in app directory: {dll_path}")
 
     return suspicious_dlls
 
@@ -115,10 +124,17 @@ def detect_linux_dll_vulnerabilities(application_path, verbose=False):
 
     suspicious_libraries = []
 
-    process = psutil.Popen(application_path)
+    process = psutil.Popen(application_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
     process.wait()
 
-    # Search for library vulnerabilities in the application directory
+    if verbose:
+        print("Application Output (stdout):")
+        print(stdout.decode("utf-8"))
+
+        print("Application Errors (stderr):")
+        print(stderr.decode("utf-8"))
+
     app_dir = os.path.dirname(application_path)
     app_libs = [lib for lib in os.listdir(app_dir) if lib.lower().endswith(".so")]
     for lib in app_libs:
@@ -128,33 +144,27 @@ def detect_linux_dll_vulnerabilities(application_path, verbose=False):
             if verbose:
                 print(f"Suspicious library in app directory: {lib_path}")
 
-    # Search for library vulnerabilities in loaded modules
-    for module in process.memory_maps():
-        lib_path = module.path
-        if lib_path.lower().endswith(".so"):
-            if not any(legit_path.lower() in lib_path.lower() for legit_path in legitimate_paths):
-                suspicious_libraries.append(lib_path)
-                if verbose:
-                    print(f"Suspicious library in loaded module: {lib_path}")
-
     process.terminate()
 
     return suspicious_libraries
 
 def detect_dll_hijacking_vulnerabilities(directory_path, verbose=False):
     suspicious_dlls = []
+    writable_dirs = []
 
     for root, _, files in os.walk(directory_path):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             if file_name.lower().endswith(".dll") and not verify_digital_signature(file_path):
-                if not is_path_writable(os.path.dirname(file_path)):
+                parent_dir = os.path.dirname(file_path)
+                if is_path_writable(parent_dir):
+                    writable_dirs.append(parent_dir)
                     suspicious_dlls.append((file_path, "Potential DLL hijacking"))
 
                 if verbose:
                     print(f"Suspicious DLL in directory: {file_path}")
 
-    return suspicious_dlls
+    return suspicious_dlls, writable_dirs
 
 
 
@@ -238,7 +248,7 @@ def determine_local_data_storage_in_directory(directory_path, verbose=False):
     return local_storage_info
 
 
-def determine_dependencies(target_path, verbose=False):
+def determine_dependencies(target_path, verbose=True, enable_progress_bar=True):
     dependencies_info = []
 
     if not os.path.exists(target_path):
@@ -256,7 +266,7 @@ def determine_dependencies(target_path, verbose=False):
 
     return dependencies_info
 
-def determine_windows_dependencies(application_path, verbose=False):
+def determine_windows_dependencies(application_path, verbose=True):
     dependencies_info = []
 
     try:
@@ -269,10 +279,15 @@ def determine_windows_dependencies(application_path, verbose=False):
             for file_name in files:
                 file_path = os.path.join(root, file_name)
                 if file_name.lower().endswith((".dll", ".ocx")):
-                    dependencies_info.append(("Dependency", file_path))
+                    version_info = get_version_info(file_path)
+                    if version_info:
+                        dependencies_info.append({
+                            "Type": "Dependency",
+                            "Path": file_path,
+                            "Version": version_info
+                        })
     except Exception as e:
         print(f"Error during Windows dependencies scan: {e}")
-
     finally:
         try:
             process.terminate()
@@ -281,35 +296,53 @@ def determine_windows_dependencies(application_path, verbose=False):
 
     return dependencies_info
 
-def determine_linux_dependencies(application_path, verbose=False):
+def determine_linux_dependencies(application_path, verbose=True):
     dependencies_info = []
 
-    process = psutil.Popen(application_path)
+    process = subprocess.Popen(application_path)
     process.wait()
 
     app_dir = os.path.dirname(application_path)
 
-    # Search for shared libraries and third-party components in the application directory
     for root, _, files in os.walk(app_dir):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             if file_name.lower().endswith(".so"):
-                dependencies_info.append(("Dependency", file_path))
+                version_info = get_version_info(file_path)
+                if version_info:
+                    dependencies_info.append({
+                        "Type": "Dependency",
+                        "Path": file_path,
+                        "Version": version_info
+                    })
 
     process.terminate()
 
     return dependencies_info
 
-def determine_dependencies_in_directory(directory_path, verbose=False):
+def determine_dependencies_in_directory(directory_path, verbose=True):
     dependencies_info = []
 
     for root, _, files in os.walk(directory_path):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             if file_name.lower().endswith((".dll", ".ocx", ".so")):
-                dependencies_info.append(("Dependency", file_path))
+                version_info = get_version_info(file_path)
+                if version_info:
+                    dependencies_info.append({
+                        "Type": "Dependency",
+                        "Path": file_path,
+                        "Version": version_info
+                    })
 
     return dependencies_info
+
+def get_version_info(file_path):
+    try:
+        info = pkg_resources.get_distribution(file_path)
+        return info.version
+    except Exception:
+        return None
 
 
 def identify_vulnerable_strings(directory_path):
@@ -322,7 +355,11 @@ def identify_vulnerable_strings(directory_path):
         r"\b(?:auth_token|session_token)\b",
         r"\b(?:api_secret|api_token|api_key)\b",
         r"\b(?:encryption_key|encryption_password)\b",
-        r"\b(?:jwt|json_web_token)\b"
+        r"\b(?:jwt|json_web_token)\b",
+        r"\b(?:[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12})\b",  # GUID pattern
+        r"\b(?:S-\d+-\d+-\d+-\d+-\d+(?:-\d+)?(?:-\d+)?)\b",  # SID pattern
+        r"\b(?:0x[0-9A-Fa-f]+)\b",  # Hexadecimal value
+        r"\b(?:[A-Za-z_]+\([A-Za-z_]+(?:, [A-Za-z_]+)*\))\b"  # API call pattern (e.g., function_name(param1, param2))
         # Add more sensitive patterns as needed
     ]
 
@@ -344,59 +381,205 @@ def identify_vulnerable_strings(directory_path):
     
     return vulnerable_strings
 
-def identify_tier_type(target_application):
+def identify_tier_type(application_content):
     tier_type = "unknown"
     tier_reason = "Unknown"
     keyword = ""
 
-    try:
-        with open(target_application, "r", errors="replace") as f:
-            application_content = f.read()
-
-        if "database" in application_content.lower():
-            tier_type = "Two-Tier (Database)"
-            keyword = "database"
-        elif "app_server" in application_content.lower() and "db_server" in application_content.lower():
-            tier_type = "Three-Tier (Separate App and DB Servers)"
-            keyword = "app_server and db_server"
-        elif any(keyword in application_content.lower() for keyword in ["web", "http", "url"]):
-            tier_type = "Three-Tier (Web Server)"
-            keyword = "web, http, or url"
-        elif any(keyword in application_content.lower() for keyword in ["app", "application"]):
-            tier_type = "Three-Tier (Application Server)"
-            keyword = "app or application"
-            
-        if keyword:
-            tier_reason = f"The application content contains keywords related to: {keyword}"
-    except PermissionError:
-        print(f"Error: Permission denied. Make sure you have read access to '{target_application}'.")
-    except FileNotFoundError:
-        print(f"Error: The file '{target_application}' does not exist.")
+    if "database" in application_content.lower():
+        tier_type = "Two-Tier (Database)"
+        keyword = "database"
+    elif "app_server" in application_content.lower() and "db_server" in application_content.lower():
+        tier_type = "Three-Tier (Separate App and DB Servers)"
+        keyword = "app_server and db_server"
+    elif any(keyword in application_content.lower() for keyword in ["web", "http", "url"]):
+        tier_type = "Three-Tier (Web Server)"
+        keyword = "web, http, or url"
+    elif any(keyword in application_content.lower() for keyword in ["app", "application"]):
+        tier_type = "Three-Tier (Application Server)"
+        keyword = "app or application"
+        
+    if keyword:
+        tier_reason = f"The application content contains keywords related to: {keyword}"
 
     return tier_type, tier_reason
 
 
-def generate_dependencies_report(dependencies_info):
-    report = "Dependencies and Third-Party Components:\n\n"
-    if dependencies_info:
-        for dependency_type, dependency_path in dependencies_info:
-            report += f"- {dependency_type}: {dependency_path}\n"
-    else:
-        report += "No dependencies found.\n"
-    report += "\n"
-    return report
+def detect_thick_client_vulnerabilities(application_path, verbose=False):
+    suspicious_actions = [
+        "CreateFile", "WriteFile", "ReadFile", "DeleteFile", "CopyFile", "MoveFile", "ShellExecute",
+        # Add more suspicious actions or API calls here
+    ]
+
+    suspicious_activities = []
+
+    process = psutil.Popen(application_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    process.wait()
+
+    if verbose:
+        print("Application Output (stdout):")
+        print(stdout.decode("utf-8"))
+
+        print("Application Errors (stderr):")
+        print(stderr.decode("utf-8"))
+
+    app_dir = os.path.dirname(application_path)
+
+    # Check for suspicious API calls in the application output
+    for action in suspicious_actions:
+        if any(action.lower() in line.lower() for line in stdout.decode("utf-8").split("\n")):
+            suspicious_activities.append((f"Suspicious API Call: {action}", ""))
+
+    # Search for files created or modified by the application
+    for root, _, files in os.walk(app_dir):
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            try:
+                file_stat = os.stat(file_path)
+                create_time = file_stat.st_ctime
+                modify_time = file_stat.st_mtime
+
+                if create_time > process.create_time() or modify_time > process.create_time():
+                    suspicious_activities.append((f"File Created/Modified: {file_path}", ""))
+            except Exception as e:
+                pass
+
+    process.terminate()
+
+    return suspicious_activities
 
 
-def generate_tier_report(tier_type, tier_reason):
-    report = f"Thick Client Tier Analysis Report:\n\n"
-    report += f"Tier Type: {tier_type}\n"
-    report += f"Reason for Tier Type:\n{tier_reason}\n\n"
-    return report
+def check_privileges():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def check_weak_passwords(line, verbose):
+    """
+    Check if a line from a file contains weak passwords.
+    """
+    weak_passwords = ["password", "123456", "admin", "qwerty"]  # Example weak passwords
+    matches = []
+
+    for password in weak_passwords:
+        if password in line:
+            matches.append(password)
+    
+    if matches and verbose:
+        print(f"Found weak passwords in line: {line.strip()}")
+    
+    return matches
+
+
+def check_sensitive_files(scan_dir):
+    sensitive_files = []
+
+    print("Scanning for sensitive files...")
+    for root, _, files in os.walk(scan_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            file_size = os.path.getsize(file_path)
+            if file_size > 1024 * 1024:  # Check if file size is greater than 1MB
+                sensitive_files.append(file_path)
+
+    return sensitive_files
+
+
+
+def scan_dll_vulnerabilities(app_path, verbose, enable_progress_bar):
+    vulnerabilities, writable_dirs = detect_dll_hijacking_vulnerabilities(app_path, verbose)
+    total_steps = len(vulnerabilities) + len(writable_dirs)
+    progress_bar = tqdm(total=total_steps, unit=' step', desc="DLL Vulnerability Scan")
+    if enable_progress_bar:
+        for vulnerability in vulnerabilities:
+            time.sleep(0.1)  # Simulate processing time
+            progress_bar.update(1)
+        for writable_dir in writable_dirs:
+            time.sleep(0.1)  # Simulate processing time
+            progress_bar.update(1)
+    progress_bar.close()
+    return vulnerabilities, writable_dirs
+
+def scan_sensitive_strings(directory_path, verbose, enable_progress_bar):
+    sensitive_strings = identify_vulnerable_strings(directory_path)
+    total_steps = len(sensitive_strings)
+    progress_bar = tqdm(total=total_steps, unit=' string', desc="Sensitive String Scan")
+    sensitive_strings_verbose = []
+
+    for file_path, line_number, line in sensitive_strings:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
+                lines = file.readlines()
+                context_lines = lines[max(0, line_number - 3):line_number + 2]
+                sensitive_strings_verbose.append(
+                    (file_path, line_number, line.strip(), context_lines))
+        except Exception as e:
+            pass
+        
+        if enable_progress_bar:
+            time.sleep(0.1)  # Simulate processing time
+            progress_bar.update(1)
+
+    progress_bar.close()
+
+    for file_path, _, line, _ in sensitive_strings_verbose:
+        print(f"Checking {file_path} for sensitive files and weak passwords...")
+        check_sensitive_files(file_path)
+        check_weak_passwords(line)
+
+    return sensitive_strings_verbose
+    
+def run_scan(scan_func, scan_name, *args):
+    try:
+        scan_results = scan_func(*args)
+        return scan_results
+    except Exception as e:
+        return f"Error during {scan_name}: {e}"
+
+def run_scan_with_progress(scan_function, scan_type, target, verbose, enable_progress_bar):
+    print(f"Starting {scan_type}...")
+    time.sleep(1)  # Simulating some initial processing
+    scan_results = scan_function(target, verbose, enable_progress_bar)  # Pass the missing arguments
+    
+    # Display a progress bar while processing
+    for _ in tqdm(range(10), desc=f"{scan_type} Progress", dynamic_ncols=True):
+        time.sleep(0.2)
+    
+    print(f"{scan_type} completed.")
+    return scan_results
+
+def run_all_scans(app_path, verbose, enable_progress_bar):
+    vulnerabilities = []
+    writable_dirs = []
+    sensitive_strings = []
+    tier_results = ("unknown", "Unknown")
+    dependencies_info = []
+
+    vulnerabilities, writable_dirs = run_scan_with_progress(
+        scan_dll_vulnerabilities, "DLL Vulnerability Scan", app_path, verbose, enable_progress_bar=True
+    )
+
+    sensitive_strings = run_scan_with_progress(
+        scan_sensitive_strings, "Sensitive String Scan", app_path, verbose, enable_progress_bar=True
+    )
+
+    tier_results = run_scan_with_progress(
+        identify_tier_type, "Thick Client Tier and Database/Server Scan", app_path, verbose, enable_progress_bar=True
+    )
+    dependencies_info = run_scan_with_progress(
+        determine_dependencies, "Third-Party Dependencies Scan", app_path, verbose, enable_progress_bar=True
+    )
+
+    return vulnerabilities, writable_dirs, sensitive_strings, tier_results, dependencies_info
+
+
+
 
 def generate_report(scan_results, scan_type, dependencies_info=None):
-    report = "\nComprehensive Scanning Report:\n\n"
-    report += f"Scan Type: {scan_type}\n\n"
-
+    report = f"\nComprehensive Scanning Report - {scan_type}\n\n"
+    
     if scan_type == "DLL Vulnerability Scan":
         if scan_results:
             report += "DLL Vulnerabilities:\n"
@@ -417,13 +600,21 @@ def generate_report(scan_results, scan_type, dependencies_info=None):
         else:
             report += "No sensitive strings found.\n\n"
     elif scan_type == "Thick Client Tier and Database/Server Scan":
-        report += f"Thick Client Tier Type: {scan_results['Tier Type']}\n"
-        report += f"Database/Server Type: {scan_results['Database/Server Type']}\n\n"
+        report += f"Thick Client Tier Type: {scan_results[0]}\n"
+        report += f"Database/Server Type: {scan_results[1]}\n\n"
 
     if dependencies_info is not None:
         report += generate_dependencies_report(dependencies_info)
 
     return report
+
+def save_report_to_file(report, file_name):
+    try:
+        with open(file_name, "w", encoding="utf-8") as report_file:
+            report_file.write(report)
+        return f"Report saved to {file_name}"
+    except Exception as e:
+        return f"Error while saving report: {e}"
 
 def display_menu():
     menu = """
@@ -459,6 +650,8 @@ def display_menu():
     print(menu)
 
 def main():
+    init()  # Initialize colorama
+
     while True:
         display_menu()
 
@@ -468,100 +661,96 @@ def main():
             print("Exiting.")
             break
         elif choice == "1":
-            app_path = input("Enter the application path to scan DLL vulnerabilities: ")
-            verbose = input("Enable verbose mode? (y/n): ").lower() == 'y'
-            vulnerabilities = detect_dll_vulnerabilities(app_path, verbose)
+            app_path = input("Enter the application path to scan for DLL vulnerabilities: ")
+            verbose = input("Enable verbose mode? (y/n): ").lower() == "y"
+
+            vulnerabilities, writable_dirs = run_scan_with_progress(
+                scan_dll_vulnerabilities, "DLL Vulnerability Scan", app_path, verbose, enable_progress_bar=True
+            )
+
             report = generate_report(vulnerabilities, "DLL Vulnerability Scan")
-            report_file_name = f"dll_vulnerability_scan_{int(time.time())}.txt"
-            with open(report_file_name, "w", encoding="utf-8") as report_file:
-                report_file.write(report)
-            print(report)
+            file_name = f"dll_vulnerability_scan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            print(save_report_to_file(report, file_name))
+
         elif choice == "2":
             directory_path = input("Enter the directory path to scan for sensitive strings: ")
-            verbose = input("Enable verbose mode? (y/n): ").lower() == 'y'
-            sensitive_strings = identify_vulnerable_strings(directory_path)
-            sensitive_strings_verbose = []
+            verbose = input("Enable verbose mode? (y/n): ").lower() == "y"
 
-            if verbose:
-                print("Scanning for sensitive strings...\n")
+            sensitive_strings = run_scan_with_progress(
+                scan_sensitive_strings, "Sensitive String Scan", directory_path, enable_progress_bar=True
+            )
 
-            for file_path, line_number, line in sensitive_strings:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
-                    lines = file.readlines()
-                    sensitive_strings_verbose.append(
-                        (file_path, line_number, line.strip(), lines[max(0, line_number - 3):line_number + 2])
-                    )
+            # Check weak passwords
+            check_weak_passwords(sensitive_strings)
 
-            report = generate_report(sensitive_strings_verbose, "Sensitive String Scan")
-            report_file_name = f"sensitive_string_scan_{int(time.time())}.txt"
-            with open(report_file_name, "w", encoding="utf-8") as report_file:
-                report_file.write(report)
-            print(report)
+            # Check sensitive files
+            check_sensitive_files(directory_path)
+
+            sensitive_strings_report = generate_report(sensitive_strings, "Sensitive String Scan")
+            file_name = f"sensitive_string_scan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            print(save_report_to_file(sensitive_strings_report, file_name))
+
+
         elif choice == "3":
-            app_path = input("Enter the application path for Thick Client Tier and Database/Server Scan: ")
-            verbose = input("Enable verbose mode? (y/n): ").lower() == 'y'
-            tier_type, tier_reason = identify_tier_type(app_path, verbose)
-            database_type = "Unknown"  # Placeholder, you can enhance this based on your analysis
+            app_path = input("Enter the application path to scan for thick client vulnerabilities: ")
+            verbose = input("Enable verbose mode? (y/n): ").lower() == "y"
 
-            print(f"\nThick Client Tier Type: {tier_type}")
-            print(f"Reason: {tier_reason}")
+            print("Analyzing thick client tier and database/server type...")
+            tier_results = run_scan_with_progress(
+                identify_tier_type, "Thick Client Tier and Database/Server Scan", app_path, verbose, enable_progress_bar=True
+            )
+            tier_report = generate_report([tier_results], "Thick Client Tier and Database/Server Scan")
 
-            report = generate_tier_report(tier_type, tier_reason)
-            report_file_name = f"tier_analysis_{int(time.time())}.txt"
-            with open(report_file_name, "w") as report_file:
-                report_file.write(report)
+            dependencies_info = run_scan_with_progress(
+                determine_dependencies, "Third-Party Dependencies Scan", app_path, verbose, enable_progress_bar=True
+            )
+            dependencies_report = generate_dependencies_report(dependencies_info)
 
-            print("\nTier Analysis Report:")
-            print(report)
+            full_report = tier_report + "\n\n" + dependencies_report
+            file_name = f"thick_client_analysis_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            print(save_report_to_file(full_report, file_name))
+            
         elif choice == "4":
-            target_path = input("Enter the application path or directory to scan for third-party dependencies: ")
-            verbose = input("Enable verbose mode? (y/n): ").lower() == 'y'
-            dependencies_info = determine_dependencies(target_path, verbose)
-            report = generate_report([], "Third-Party Dependencies Scan", dependencies_info)
-            report_file_name = f"dependencies_scan_{int(time.time())}.txt"
-            with open(report_file_name, "w", encoding="utf-8") as report_file:
-                report_file.write(report)
-            print(report)
+            app_path = input("Enter the application path to scan for third-party dependencies: ")
+            verbose = input("Enable verbose mode? (y/n): ").lower() == "y"
+
+            dependencies_info = run_scan_with_progress(
+               determine_dependencies, "Third-Party Dependencies Scan", app_path, verbose, enable_progress_bar=True
+            )
+
+            report = generate_report(dependencies_info, "Third-Party Dependencies Scan")
+            file_name = f"dependencies_scan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            print(save_report_to_file(report, file_name))
+            
         elif choice == "5":
-            target_path = input("Enter the application path or directory to run all scans: ")
-            verbose = input("Enable verbose mode? (y/n): ").lower() == 'y'
+            app_path = input("Enter the application path to run all scans: ")
+            verbose = input("Enable verbose mode? (y/n): ").lower() == "y"
+
+            vulnerabilities, writable_dirs, sensitive_strings = run_all_scans(
+                app_path, verbose, enable_progress_bar=True
+            )
+
+            dll_vulnerability_report = generate_report(vulnerabilities, "DLL Vulnerability Scan")
+            sensitive_string_report = generate_report(sensitive_strings, "Sensitive String Scan")
+
+            tier_results = run_scan(identify_tier_type, app_path, verbose)
+            tier_report = generate_report([tier_results], "Thick Client Tier and Database/Server Scan")
+
+            dependencies_info = run_scan(determine_dependencies, app_path, verbose)
+            dependencies_report = generate_dependencies_report(dependencies_info)
+
+            full_report = (
+                dll_vulnerability_report
+                + "\n\n"
+                + sensitive_string_report
+                + "\n\n"
+                + tier_report
+                + "\n\n"
+                + dependencies_report
+            )
+            file_name = f"comprehensive_scan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            print(save_report_to_file(full_report, file_name))
             
-            vulnerabilities = detect_dll_vulnerabilities(target_path, verbose)
-            sensitive_strings = identify_vulnerable_strings(target_path)
-            tier_type, tier_reason = identify_tier_type(target_path)
-            dependencies_info = determine_dependencies(target_path, verbose)
-            
-            reports = []
-
-            if vulnerabilities:
-                vulnerabilities_report = generate_report(vulnerabilities, "DLL Vulnerability Scan")
-                reports.append(vulnerabilities_report)
-
-            if sensitive_strings:
-                sensitive_strings_verbose = []
-                for file_path, line_number, line in sensitive_strings:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
-                        lines = file.readlines()
-                        sensitive_strings_verbose.append(
-                            (file_path, line_number, line.strip(), lines[max(0, line_number - 3):line_number + 2])
-                        )
-                sensitive_strings_report = generate_report(sensitive_strings_verbose, "Sensitive String Scan")
-                reports.append(sensitive_strings_report)
-
-            tier_report = generate_tier_report(tier_type, tier_reason)
-            reports.append(tier_report)
-
-            if dependencies_info:
-                dependencies_report = generate_report([], "Third-Party Dependencies Scan", dependencies_info)
-                reports.append(dependencies_report)
-
-            summary_report = "\n".join(reports)
-            summary_report_file_name = f"comprehensive_scan_{int(time.time())}.txt"
-            with open(summary_report_file_name, "w", encoding="utf-8") as report_file:
-                report_file.write(summary_report)
-
-            print("\nComprehensive Scan Summary Report:")
-            print(summary_report)
         else:
             print("Invalid choice. Please select a valid option.")
 
